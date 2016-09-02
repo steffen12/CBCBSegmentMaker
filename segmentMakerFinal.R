@@ -62,7 +62,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
 {
   print("GENE");
   print(geneID);
-  FASTAString = "";
+  FASTAString = ""; #FASTAString will contain the segment entries for the whole gene and will be written to the file output at the end
   #Construct all the graphs of the gene
   geneJunctionGraph <- sgf_ucsc[(geneID(sgf_ucsc) == geneID) & (SGSeq::type(sgf_ucsc) == "J")];
   geneGraph <- sgf_ucsc[(geneID(sgf_ucsc) == geneID) & (SGSeq::type(sgf_ucsc) == "E")];
@@ -85,6 +85,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
   }
   else
   {
+    #Get Indices of exons used in the transcripts. -1 is a placeholder for the root, and 99999 is a placeholder for the leaf
     transcriptsIndices = lapply(geneTranscripts, function(geneTranscript) c(-1, which(any(geneTranscript == txName(geneGraph))), 99999));#Include placeholders for root and leaf
     transcripts = lapply(transcriptsIndices, function(transcriptIndices) geneGraph[transcriptIndices[c(-1, -length(transcriptIndices))]]);
     startEndStopsList = findStartAndEndStops(transcriptsIndices, length(geneGraph)); #Finds gene indexes of forks and merges
@@ -100,28 +101,32 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
       startIndex = 1; #Start at the first exon
       endIndex = 1;
       #To make the first region, have the first exon be the starting exon, and keep moving down the transcript until the sum of the lengths of all exons is greater than or equal to k
-      while(rangeLength + width(transcript[endIndex]) < k && (endIndex < length(transcript)))
+      while(rangeLength + width(transcript[endIndex]) < k && (endIndex < length(transcript))) #If region is smaller than k, should it even be made?
       {
         rangeLength = rangeLength + width(transcript[endIndex]);
         endIndex = endIndex + 1
       }
+      #startIndex is the index of the first exon in the region, startBase is the base in that exon which the region begins (first base in this case)
+      #endIndex is the index of the last exon in the region, endBase is the base in that exon which the region ends
       startExon = transcript[startIndex];
       startBase= start(startExon);
       endExon = transcript[endIndex];
-      endBase = start(endExon) + (k - 1); #Assumes that endExon is greater than length k?
+      endBase = start(endExon) + (k - 1);
+      #Subtract from endBase so that endBase is k bp downstream from the start of the transcript and the region represented is k bp long
       if(startIndex != endIndex) 
       {
         endBase = endBase - sum(width(transcript[startIndex:(endIndex-1)]));
       }
       prevStartIndex = startIndex;
       prevStartBase = start(startExon);
-      while(endIndex <= length(transcript))
+      while(endIndex <= length(transcript)) #Keep running until the program attempts to move onto an exon after the last exon
       {
         startExon = transcript[startIndex];
         endExon = transcript[endIndex];
+        #These values will be used later, need to be stored now
         startIndexBefore = startIndex; #Start and end index before + 1
         endIndexBefore = endIndex;
-        if(end(startExon)-startBase < end(endExon)-endBase) #Start is closer
+        if(end(startExon)-startBase < end(endExon)-endBase) #If for the region, the distance from startBase to the end of the first exon in the region is greater than the distance from endBase to the end of the last exon in the region
         {
           endSegment = FALSE;
           startSegment = TRUE;
@@ -129,7 +134,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
           endBase = endBase+end(startExon)-startBase + 1; #+1?
           startBase = start(transcript[startIndex]);
         }
-        else if (end(startExon)-startBase > end(endExon)-endBase) #end is closer
+        else if (end(startExon)-startBase > end(endExon)-endBase)  #If for the region, the distance from endBase to the end of the last exon in the region is greater than the distance from startBase to the end of the first exon in the region
         {
           endSegment = TRUE;
           startSegment = FALSE;
@@ -140,7 +145,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
             endBase = start(transcript[endIndex]);
           }
         }
-        else #start and end are equally close
+        else #If for the region, the distance from endBase to the end of the last exon in the region equals the distance from startBase to the end of the first exon in the region
         {
           endSegment = TRUE;
           startSegment = TRUE;
@@ -153,29 +158,30 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
           startBase = start(transcript[startIndex]);
         }
         #Check previous values of ended and started
-        ended = (endSegment && endStops[transcriptIndices[endIndexBefore]]);
-        started = (startSegment && startStops[transcriptIndices[startIndexBefore+1]]); #Check if next one is start
-        if(ended)
+        ended = (endSegment && endStops[transcriptIndices[endIndexBefore]]); #True if previous last exon of the region was the start of a fork
+        started = (startSegment && startStops[transcriptIndices[startIndexBefore+1]]); #True if previous first exon of the region followed a merge
+        if(ended) #If the previous region was segmented once the last exon hit the start of a fork
         {
-          region = transcript[prevStartIndex:(endIndexBefore)];
-          currentSegmentTranscripts <- sort(Reduce(intersect, (txName(transcripts[[i]][prevStartIndex:endIndexBefore]))));#txName(transcripts[[i]][prevStartIndex])[[1]] #sort(unique(unlist(txName(transcripts[[i]][prevStartIndex:(endIndexBefore)]))));
+          region = transcript[prevStartIndex:(endIndexBefore)]; #Region is created from the startIndex of the previous first exon of the region
+          currentSegmentTranscripts <- sort(Reduce(intersect, (txName(transcripts[[i]][prevStartIndex:endIndexBefore])))); #Find the intersection of all transcripts of all the elements
+          #txName(transcripts[[i]][prevStartIndex])[[1]] #sort(unique(unlist(txName(transcripts[[i]][prevStartIndex:(endIndexBefore)]))));
           start(region[1]) = prevStartBase;
           prevStartBase = startBase;#+1 #Add one to move to next base, as previous one was already covered
           prevStartIndex = startIndex;
-          if(currentSegmentTranscripts[1] == currentTranscript)
+          if(currentSegmentTranscripts[1] == currentTranscript) #The currentSegmentTranscripts array should be in the same order for duplicate segments created, so this line ensures that a segment is made only if the currentTranscript is the first transcript in the list
           {
             FASTAString = addFASTASegmentEntry(region, hg19, currentStrand, currentChromosome, geneID, currentSegmentTranscripts, FASTAString)
           }
         }
-        else if(started)
+        else if(started) #If the previous region was segmented once the first exon hit the end of a merge
         {
-          region = transcript[prevStartIndex:endIndexBefore];
-          currentSegmentTranscripts <- sort(Reduce(intersect, (txName(transcripts[[i]][prevStartIndex:endIndex]))));#txName(transcripts[[i]][prevStartIndex])[[1]] #sort(unique(unlist(txName(transcripts[[i]][prevStartIndex:(endIndexBefore)]))));
+          region = transcript[prevStartIndex:endIndexBefore]; #Region is created from the startIndex of the previous first exon of the region
+          currentSegmentTranscripts <- sort(Reduce(intersect, (txName(transcripts[[i]][prevStartIndex:endIndex])))); #Find the intersection of all transcripts of all the elements
           start(region[1]) = prevStartBase;
           end(region[length(region)]) = endBase-1; #-1?
           prevStartBase = startBase;
           prevStartIndex = startIndex;
-          if(currentSegmentTranscripts[1] == currentTranscript)
+          if(currentSegmentTranscripts[1] == currentTranscript) #The currentSegmentTranscripts array should be in the same order for duplicate segments created, so this line ensures that a segment is made only if the currentTranscript is the first transcript in the list
           {
             FASTAString = addFASTASegmentEntry(region, hg19, currentStrand, currentChromosome, geneID, currentSegmentTranscripts, FASTAString)
           }
