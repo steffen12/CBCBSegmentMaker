@@ -1,5 +1,6 @@
 #startTime = proc.time();
 
+#Read in files
 transcriptomeLibrary = "TxDb.Hsapiens.UCSC.hg19.knownGene";
 genomeLibrary = "BSgenome.Hsapiens.UCSC.hg19";
 k = 100
@@ -11,11 +12,13 @@ library(parallel);
 no_cores <- detectCores()
 cl <- makeCluster(no_cores)
 
+#Create Output Directory if it doesn't exist
 if(!dir.exists(file.path("SegmentMakerFinalOutput")))
 {
   dir.create("SegmentMakerFinalOutput");
 }
 
+#Function to return a FASTA string for outputting given a region
 addFASTASegmentEntry <- function(region, hg19, currentStrand, currentChromosome, geneID, commonTranscripts, FASTAString)
 {
   regionID = paste(">", currentChromosome, "|", geneID,"|", paste(csepommonTranscripts, collapse=","),"|", sep="");
@@ -27,14 +30,17 @@ addFASTASegmentEntry <- function(region, hg19, currentStrand, currentChromosome,
   return(FASTAString);
 }
 
+#This function finds the forks and merges in the transcriptome graph
 findStartAndEndStops <- function(transcriptsIndices, geneLength)
 {
   numTranscripts = length(transcriptsIndices);
-  startStops <- vector(mode="logical", length=geneLength);
-  endStops <- vector(mode="logical", length=geneLength);
+  startStops <- vector(mode="logical", length=geneLength); #Vector element will be true if index comes after a merge
+  endStops <- vector(mode="logical", length=geneLength); #Vector element will be false if index comes before a fork
   indices <- rep(2, numTranscripts);#start at 2 because 1 is -1 (root node)
   for(h in 1:geneLength)
   {
+    #For each transcript, get a list of the next exon for each exon in a list and another list of the previous exon bin for each exon in a list
+    #If for exon #2, there are two different exons that follow on different transcripts, then exon #2 is the start of a fork. If there are two different exons that precede on different transcripts, then exon #2 is the end of a merge.
     currentElements = sapply(1:numTranscripts, function(x) transcriptsIndices[[x]][indices[x]]); #Try vapply to make it faster
     currentIndices = which(currentElements == h);
     nextElements = sapply(1:length(currentIndices), function(x) transcriptsIndices[[currentIndices[x]]][indices[currentIndices[x]]+1]);
@@ -57,6 +63,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
   print("GENE");
   print(geneID);
   FASTAString = "";
+  #Construct all the graphs of the gene
   geneJunctionGraph <- sgf_ucsc[(geneID(sgf_ucsc) == geneID) & (SGSeq::type(sgf_ucsc) == "J")];
   geneGraph <- sgf_ucsc[(geneID(sgf_ucsc) == geneID) & (SGSeq::type(sgf_ucsc) == "E")];
   geneTranscripts <- sort(unique(unlist(txName(geneGraph))));
@@ -68,7 +75,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
   {
     print(paste("Error on Gene", geneID));
   }
-  else if(length(geneTranscripts) == 1)
+  else if(length(geneTranscripts) == 1) #If the gene only has one transcript, don't process it normally, just output that transcript as it is
   {
     regionID = paste(">", currentChromosome, ":", geneID,"|",geneTranscripts,"|");
     sequence = "";
@@ -81,17 +88,18 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
     transcriptsIndices = lapply(geneTranscripts, function(geneTranscript) c(-1, which(any(geneTranscript == txName(geneGraph))), 99999));#Include placeholders for root and leaf
     transcripts = lapply(transcriptsIndices, function(transcriptIndices) geneGraph[transcriptIndices[c(-1, -length(transcriptIndices))]]);
     startEndStopsList = findStartAndEndStops(transcriptsIndices, length(geneGraph)); #Finds gene indexes of forks and merges
-    startStops = startEndStopsList[[1]];
+    startStops = startEndStopsList[[1]]; #Unpackage startStops and endStops
     endStops = startEndStopsList[[2]];
     for(i in 1:length(transcripts))
     {
       transcript = ranges(transcripts[[i]]);
       transcriptIndices = transcriptsIndices[[i]][c(-1, -1*length(transcriptsIndices[[i]]))];
       currentTranscript = geneTranscripts[i]; #Current Transcript Name
-      currentStrand = as.character(strand(transcripts[[1]][1])); #Make cause issues
+      currentStrand = as.character(strand(transcripts[[1]][1]));
       rangeLength = 0;
-      startIndex = 1;
+      startIndex = 1; #Start at the first exon
       endIndex = 1;
+      #To make the first region, have the first exon be the starting exon, and keep moving down the transcript until the sum of the lengths of all exons is greater than or equal to k
       while(rangeLength + width(transcript[endIndex]) < k && (endIndex < length(transcript)))
       {
         rangeLength = rangeLength + width(transcript[endIndex]);
@@ -100,7 +108,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
       startExon = transcript[startIndex];
       startBase= start(startExon);
       endExon = transcript[endIndex];
-      endBase = start(endExon) + (k - 1);
+      endBase = start(endExon) + (k - 1); #Assumes that endExon is greater than length k?
       if(startIndex != endIndex) 
       {
         endBase = endBase - sum(width(transcript[startIndex:(endIndex-1)]));
@@ -178,6 +186,7 @@ processGene(geneID, sgf_ucsc, geneGraph, outputFile)
   write(substr(FASTAString, 1, nchar(FASTAString)-2), file=outputFile, append=TRUE, sep = "");
 }
 
+#Call this function once per chromosome to process it and make segments
 processChromosome <- function(currentChromosome, k, transcriptomeLibrary, genomeLibrary, addFASTASegmentEntry, findStartAndEndStops)
 {
   library(SGSeq);
@@ -195,9 +204,9 @@ processChromosome <- function(currentChromosome, k, transcriptomeLibrary, genome
   print(numGenes)
   startGene = 1
   
-  for (geneID in startGene:numGenes)#make numGenes
+  for (geneID in startGene:numGenes)
   {
-    try(processGene(geneID, sgf_ucsc, geneGraph, outputFile));
+    try(processGene(geneID, sgf_ucsc, geneGraph, outputFile)); #Gene may fail due to issues with SGSeq package
   }
 }
 
@@ -205,6 +214,6 @@ txdb <- eval(parse(text = transcriptomeLibrary));
 txdb <- restoreSeqlevels(txdb);
 chromosomes = seqlevels(txdb)
 #nullOutput = bplapply(chromosomes, processChromosome, BPPARAM = MulticoreParam(), txdb=txdb);
-nullOutput = parLapply(cl, chromosomes, processChromosome, k=k, transcriptomeLibrary=transcriptomeLibrary, genomeLibrary=genomeLibrary, addFASTASegmentEntry=addFASTASegmentEntry, findStartAndEndStops=findStartAndEndStops);
+nullOutput = parLapply(cl, chromosomes, processChromosome, k=k, transcriptomeLibrary=transcriptomeLibrary, genomeLibrary=genomeLibrary, addFASTASegmentEntry=addFASTASegmentEntry, findStartAndEndStops=findStartAndEndStops); #Code is parallelized
 
 #print(proc.time() - startTime);
